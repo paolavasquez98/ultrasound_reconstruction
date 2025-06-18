@@ -1,0 +1,24 @@
+#!/bin/sh
+#PBS -N train_tl
+#PBS -l nodes=gpu48:ppn=2:gpus=1 #gpu48 for better performance
+#PBS -l mem=64gb  
+#PBS -l walltime=200:00:00 
+#PBS -q gpu  
+#PBS -o beamforming/logs/pbs_logs/log.log  
+#PBS -e beamforming/logs/pbs_logs/error.log   
+#PBS -m ae  
+#PBS -M paola.vasquez@creatis.insa-lyon.fr
+
+# Move to the working directory
+cd $PBS_O_WORKDIR
+
+# Activate Conda  
+source ~/.bashrc
+conda activate newEnv 
+
+# Run your training script
+# qsub beamforming/train_file.pbs
+# python -u beamforming/trainin/train_pb.py
+python -u beamforming/training/base_code.py
+# python -u beamforming/training/transfer_learn.py
+# python -u beamforming/training/diff_train.py
