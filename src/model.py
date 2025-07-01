@@ -7,9 +7,9 @@ from torch.autograd import Function
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import complextorch.nn as ctnn
-from complextorch.nn import functional as cvF
-from complextorch.nn.modules.pooling import AdaptiveAvgPool3d
-# from complextorch.nn.modules.activation.split_type_B import modReLU
+from complextorch.nn.modules.activation.fully_complex import CVSigmoid
+from complextorch.nn.modules.activation.split_type_B import CVPolarTanh
+
     
 class ComplexConv3D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
@@ -81,19 +81,15 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, num_groups):
         super(EncoderBlock, self).__init__()
         self.block = nn.Sequential(
-            ComplexConv3D(in_channels, out_channels, kernel_size=3, padding=1, stride=2),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, stride=2, dtype=torch.cfloat),
+            ComplexBatchNorm3D(out_channels),
+            # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU(),
-            # modReLU(bias=-1.0),
 
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat),
+            ComplexBatchNorm3D(out_channels),
+            # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU()
-            # modReLU(bias=-1.0),
         )
     def forward(self, x):
         return self.block(x)
@@ -102,19 +98,14 @@ class DecoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, num_groups):
         super(DecoderBlock, self).__init__()
         self.block = nn.Sequential(
-            ComplexConvTranspose3D(in_channels, out_channels, kernel_size=2, padding=0, stride=2),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, padding=0, stride=2, dtype=torch.cfloat),
+            ComplexBatchNorm3D(out_channels),
             ComplexReLU(),
-            # modReLU(bias=-1.0),
 
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat),
+            ComplexBatchNorm3D(out_channels),
+            # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU()
-            # modReLU(bias=-1.0),
         )
     def forward(self, x):
         return self.block(x)
@@ -123,19 +114,15 @@ class Bottleneck(nn.Module):
     def __init__(self, in_channels, out_channels, num_groups):
         super(Bottleneck, self).__init__()
         self.block = nn.Sequential(
-            ComplexConv3D(in_channels, out_channels, kernel_size=3, padding=1),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            ComplexBatchNorm3D(out_channels),
+            # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU(),
-            # modReLU(bias=-1.0),
 
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            # ComplexBatchNorm3D(out_channels),
-            ComplexGroupNorm3D(num_groups, out_channels),
-            # cplx_nn.CVBatchNorm3d(out_channels),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat),
+            ComplexBatchNorm3D(out_channels),
+            # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU()
-            # modReLU(bias=-1.0),
         )
     def forward(self, x):
         return self.block(x)
@@ -197,26 +184,32 @@ class ComplexCBAM(nn.Module):
         super(ComplexCBAM, self).__init__()
         
         # Channel attention
-        self.avg_pool = ctnn.modules.pooling.AdaptiveAvgPool3d(1)
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.max_pool = nn.AdaptiveMaxPool3d(1)
 
         self.mlp = nn.Sequential(
             nn.Conv3d(channels, channels // reduction, kernel_size=1, dtype=torch.cfloat),
             ComplexReLU(),
             nn.Conv3d(channels // reduction, channels, kernel_size=1, dtype=torch.cfloat)
         )
+        self.sigmoid = CVSigmoid()
 
         # Spatial attention
-        self.conv_spatial = nn.Conv3d(1, 1, kernel_size=7, padding=3, dtype=torch.cfloat)
+        self.conv_spatial = nn.Conv3d(2, 1, kernel_size=7, padding=3, dtype=torch.cfloat)
 
     def forward(self, x):
         # ----- Channel Attention -----
-        avg_out = self.avg_pool(x)            # shape: [B, C, 1, 1, 1]
-        channel_att = torch.sigmoid(self.mlp(avg_out))
+        avg_out = self.mlp(self.avg_pool(x))           # [B, C, 1, 1, 1] complex
+        max_out = self.mlp(self.max_pool(x))           # [B, C, 1, 1, 1] complex
+        channel_att = self. sigmoid(avg_out + max_out)       
+        # This scales the magnitudes of x channel-wise while preserving phase.    
         x = x * channel_att
 
         # ----- Spatial Attention -----
         avg = torch.mean(x, dim=1, keepdim=True)         # [B, 1, D, H, W]
-        spatial_att = torch.sigmoid(self.conv_spatial(avg))
+        max, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg, max], dim=1)  # [B, 2, D, H, W]
+        spatial_att = self.sigmoid(self.conv_spatial(x)) # [B, 1, D, H, W] complex
         x = x * spatial_att
 
         return x
@@ -291,7 +284,7 @@ class CIDNet3D(nn.Module):
         self.layer2 = nn.Conv3d(in_channels=32//pieces, out_channels=64, kernel_size=3, padding=1, dtype=torch.cfloat) #192
         self.layer3 = nn.Conv3d(in_channels=64//pieces, out_channels=32, kernel_size=3, padding=1, dtype=torch.cfloat) #192
 
-        # The muklti path with different kernel sizes to get different spatial features
+        # The multi path with different kernel sizes to get different spatial features
         self.layer4_1 = nn.Conv3d(in_channels=32//pieces, out_channels=4, kernel_size=(5, 7, 7), padding=(2, 3, 3), dtype=torch.cfloat) #192
         self.layer4_2 = nn.Conv3d(in_channels=32//pieces, out_channels=4, kernel_size=(3, 7, 7), padding=(1, 3, 3), dtype=torch.cfloat)
         self.layer4_3 = nn.Conv3d(in_channels=32//pieces, out_channels=4, kernel_size=(1, 3, 3), dtype=torch.cfloat)
@@ -325,146 +318,169 @@ class CIDNet3D(nn.Module):
         return x
 
 
-def init_complex_conv3d_weight(kernel_size, input_dim, output_dim, init_mode='HeInit', device='cpu'):
-    if isinstance(kernel_size, int):
-        kernel_size = (kernel_size, kernel_size, kernel_size)
-    elif isinstance(kernel_size, tuple) and len(kernel_size) != 3:
-        raise ValueError("kernel_size must be an int or a tuple of 3 integers for 3D convolution.")
-    
-    n_row = output_dim * input_dim
-    n_col = kernel_size[0] * kernel_size[1] * kernel_size[2]
-
-    r = torch.randn(n_row, n_col, device=device)
-    i = torch.randn(n_row, n_col, device=device)
-    z = r + 1j * i
-
-    # SVD-based unitary initialization
-    u, _, v = torch.linalg.svd(z, full_matrices=False)
-    z_unitary = u @ torch.conj(v)
-
-    real_unitary = z_unitary.real
-    imag_unitary = z_unitary.imag
-
-    real_reshape = real_unitary.reshape(output_dim, input_dim, *kernel_size)
-    imag_reshape = imag_unitary.reshape(output_dim, input_dim, *kernel_size)
-
-    if init_mode == 'HeInit':
-        desired_var = 1. / input_dim
-    elif init_mode == 'GlorotInit':
-        desired_var = 1. / (input_dim + output_dim)
-    else:
-        raise ValueError(f"Unsupported init_mode '{init_mode}'")
-
-    real_weight = real_reshape * torch.sqrt(desired_var / torch.var(real_reshape))
-    imag_weight = imag_reshape * torch.sqrt(desired_var / torch.var(imag_reshape))
-
-    return real_weight, imag_weight
-
-def apply_complex_init(module):
-    if isinstance(module, ComplexConv3D):
-        real_w, imag_w = init_complex_conv3d_weight(
-            kernel_size=module.real_conv.kernel_size,
-            input_dim=module.real_conv.in_channels,
-            output_dim=module.real_conv.out_channels,
-            init_mode='HeInit',
-            device=module.real_conv.weight.device
-        )
-        with torch.no_grad():
-            module.real_conv.weight.copy_(real_w)
-            module.imag_conv.weight.copy_(imag_w)
-
-            # Initialize biases to zero (or custom value)
-            if module.real_conv.bias is not None:
-                module.real_conv.bias.zero_()
-                module.imag_conv.bias.zero_()
-
-    elif isinstance(module, ComplexConvTranspose3D):
-        real_w, imag_w = init_complex_conv3d_weight(
-            kernel_size=module.real_convt.kernel_size,
-            input_dim=module.real_convt.out_channels,  # note: swapped
-            output_dim=module.real_convt.in_channels,
-            init_mode='HeInit',
-            device=module.real_convt.weight.device
-        )
-        with torch.no_grad():
-            module.real_convt.weight.copy_(real_w)
-            module.imag_convt.weight.copy_(imag_w)
-
-            if module.real_convt.bias is not None:
-                module.real_convt.bias.zero_()
-                module.imag_convt.bias.zero_()
-
-# ------------other options for the encoder and decoder blocks----------------
-class EncoderBlock2(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.block = nn.Sequential(
-            ComplexConv3D(in_channels, out_channels, kernel_size=3, padding=1, stride=2),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-        )
-    def forward(self, x):
-        return self.block(x)
-
-class DecoderBlock2(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.block = nn.Sequential(
-            ComplexConvTranspose3D(in_channels, out_channels, kernel_size=2, padding=0, stride=2),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-        )
-    def forward(self, x):
-        return self.block(x)
-    
-class Bottleneck2(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.block = nn.Sequential(
-            ComplexConv3D(in_channels, out_channels, kernel_size=3, padding=1),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-
-            ComplexConv3D(out_channels, out_channels, kernel_size=3, padding=1),
-            ComplexBatchNorm3D(out_channels),
-            ComplexLReLU(),
-        )
-    def forward(self, x):
-        return self.block(x)
-
-class Unet3Dcx2(nn.Module):
+# -------------- Complex RNN with GRU --------------
+class ComplexRNN_GRU(nn.Module):
     def __init__(self):
         super().__init__()
+        self.encoder = CNNEncoder()           # [B, 1, D, H, W] -> [B, F]
+        self.gru = ComplexGRU(input_dim=256, hidden_dim=512)
+        self.decoder = CNNDecoder()           # [B, H_gru] -> [B, 1, D, H, W]
 
-        self.encoder1 = EncoderBlock2(9, 16)
-        self.encoder2 = EncoderBlock2(16, 32)
-        self.encoder3 = EncoderBlock2(32, 64)
+    def forward(self, x):  # x input shape: [B, C=9, D, H, W]
+        # i need to add a dimention to havex: [B, T=9, 1, D, H, W]
+        x = x.unsqueeze(2)  # Add a channel dimension: [B, T, C=1, D, H, W]
+        B, T, C, D, H, W = x.shape
+        # instead of changing the shape i send the data in a loop
 
-        self.bottleneck = Bottleneck2(64, 128)
+        # List to store feature vectors for each time step
+        feature_vectors_list = []
+        for t in range(T):
+            # Extract the t-th time step
+            x_t = x[:, t, :, :, :, :] # [B, C, D, H, W] where C=1
+            encoded_t = self.encoder(x_t)  # [B, F]
+            # print("After encoder:", encoded_t.shape)   
+            feature_vectors_list.append(encoded_t)
+        
+        # Stack the list of feature vectors to form the GRU input sequence [B, T, F] where T=9 and F=256
+        gru_input = torch.stack(feature_vectors_list, dim=1) # Stack along dim=1 (sequence length)
+        # print("GRU input shape:", gru_input.shape)  # [B, T=9, F=256]
+        all_hidden_states, h_n = self.gru(gru_input)               # h_n: [1, B, H_gru] ComplexGRU returns (all_hidden_states, final_h)
+        # print("GRU output shape:", h_n.shape)    
+        h_n = h_n.squeeze(0)                     # [B, H_gru]
+        output = self.decoder(h_n)               # [B, 1, D, H, W]
+        return output
 
-        self.decoder1 = DecoderBlock2(128 + 64, 64)
-        self.decoder2 = DecoderBlock2(64 + 32, 32)
-        self.decoder3 = DecoderBlock2(32 + 16, 16)
-
-        self.final_conv = ComplexConv3D(16, 1, kernel_size=1)
+class CNNEncoder(nn.Module):
+    def __init__(self, feature_dim=256):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv3d(1, 16, kernel_size=3, stride=2, padding=1, dtype=torch.cfloat),  # [B, 16, 96, 96, 96]
+            ComplexReLU(),
+            nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1, dtype=torch.cfloat), # [B, 32, 48, 48, 48]
+            ComplexReLU(),
+            nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1, dtype=torch.cfloat), # [B, 64, 24, 24, 24]
+            ComplexReLU(),
+            nn.Flatten(start_dim=1),                                          # [B, 64 * 24 * 24 * 24] = [B, 884736]
+            nn.Linear(64 * (192//8) * (192//8) * (192//8), feature_dim, dtype=torch.cfloat),          # [B, feature_dim]
+            ComplexReLU()
+        )
 
     def forward(self, x):
-        e1 = self.encoder1(x) # [B, 16, 96, 96, 96]
-        e2 = self.encoder2(e1) # [B, 32, 48, 48, 48]
-        e3 = self.encoder3(e2) # [B, 64, 24, 24, 24]
+        return self.encoder(x)
+    
+class CNNDecoder(nn.Module):
+    def __init__(self, feature_dim=512, output_shape=(1, 192, 192, 192)):
+        super().__init__()
+        self.decoder = nn.Sequential(
+            nn.Linear(feature_dim, 64 * (192//8) * (192//8) * (192//8), dtype=torch.cfloat),  # [B, 64 * H/8 * W/8 * D/8]
+            ComplexReLU(),
+            # reshape back to the original shape
+            nn.Unflatten(1, (64, (192//8),(192//8), (192//8))),  # [B, 64, D/8, H/8, W/8]
+            nn.ConvTranspose3d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1, dtype=torch.cfloat),
+            ComplexReLU(),
+            nn.ConvTranspose3d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1, dtype=torch.cfloat),
+            ComplexReLU(),
+            nn.ConvTranspose3d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1, dtype=torch.cfloat),
+            # nn.Sigmoid()  # for now no activation function at the end, can be changed later
+        )
 
-        b = self.bottleneck(e3)  # [B, 128, 24, 24, 24]
+    def forward(self, x):
+        return self.decoder(x)
 
-        d1 = self.decoder1(torch.cat([b, e3], dim=1))  # [B, 64, 48, 48, 48]
-        d2 = self.decoder2(torch.cat([d1, e2], dim=1)) # [B, 32, 96, 96, 96]
-        d3 = self.decoder3(torch.cat([d2, e1], dim=1)) # [B, 16, 192, 192, 192]
+class ComplexGRUCell(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
 
-        return self.final_conv(d3) # [B, 1, 192, 192, 192]
+        self.x_z = nn.Linear(input_dim, hidden_dim, dtype=torch.cfloat) # input to hidden
+        self.h_z = nn.Linear(hidden_dim, hidden_dim, dtype=torch.cfloat) # hidden to hidden
+
+        self.x_r = nn.Linear(input_dim, hidden_dim, dtype=torch.cfloat)
+        self.h_r = nn.Linear(hidden_dim, hidden_dim, dtype=torch.cfloat)
+
+        self.x_h = nn.Linear(input_dim, hidden_dim, dtype=torch.cfloat)
+        self.h_h = nn.Linear(hidden_dim, hidden_dim, dtype=torch.cfloat)
+
+        self.sigmoid = CVSigmoid()
+        self.tanh = CVPolarTanh()
+
+    def forward(self, x , h):
+        # x, h: [B, D] complex-valued
+
+        # Compute update gate
+        z = self.sigmoid(self.x_z(x) + self.h_z(h)) #input to hidden + hidden to hidden
+
+        # Compute reset gate
+        r = self.sigmoid(self.x_r(x) + self.h_r(h))
+
+        # Compute candidate hidden state
+        h_tilde = self.tanh(self.x_h(x) + self.h_h(r * h)) # Element-wise complex multiplication (r * h)
+
+        # Final hidden state update
+        h_new = (1 - z) * h + z * h_tilde
+        return h_new
+
+class ComplexGRU(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers=1, bias=True, batch_first=True):
+        super().__init__()
+        self.cell = ComplexGRUCell(input_dim, hidden_dim)
+
+    def forward(self, x):
+        # x: [B, T, F] complex-valued
+        B, T, F = x.shape
+        # initialize hidden state it must be [num_layers * num_directions, B, hidden_dim]
+        h = torch.zeros(1, B, self.cell.hidden_dim, dtype=torch.cfloat, device=x.device)
+        current_h = h[0, :, :] 
+
+        hidden_states = []
+        for t in range(T):
+            current_x = x[:, t, :] # [B, F]
+            current_h = self.cell(current_x, current_h) #update the current hidden state
+            hidden_states.append(current_h)
+        all_hidden_states = torch.stack(hidden_states, dim=0)  # [T, B, H]
+        all_hidden_states = all_hidden_states.transpose(0, 1)  # [B, T, H]
+        final_h = current_h.unsqueeze(0) # [1, B, H]
+        return all_hidden_states, final_h  # Final complex hidden state
+
+class ComplexRNN_GRU_all_h(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = CNNEncoder()           # [B, 1, D, H, W] -> [B, F]
+        self.gru = ComplexGRU(input_dim=256, hidden_dim=512)
+        self.decoder = CNNDecoder()           # [B, H_gru] -> [B, 1, D, H, W]
+        self.final_conv = nn.Conv3d(9, 1, kernel_size=1, dtype=torch.cfloat)  # Final convolution to match output shape
+
+    def forward(self, x):  # x input shape: [B, C=9, D, H, W]
+        # i need to add a dimention to havex: [B, T=9, 1, D, H, W]
+        x = x.unsqueeze(2)  # Add a channel dimension: [B, T, C=1, D, H, W]
+        B, T, C, D, H, W = x.shape
+        # instead of changing the shape i send the data in a loop
+
+        # List to store feature vectors for each time step
+        feature_vectors_list = []
+        for t in range(T):
+            # Extract the t-th time step
+            x_t = x[:, t, :, :, :, :] # [B, C, D, H, W] where C=1
+            encoded_t = self.encoder(x_t)  # [B, F]
+            # print("After encoder:", encoded_t.shape)   
+            feature_vectors_list.append(encoded_t)
+        
+        # Stack the list of feature vectors to form the GRU input sequence [B, T, F] where T=9 and F=256
+        gru_input = torch.stack(feature_vectors_list, dim=1) # Stack along dim=1 (sequence length)
+        # print("GRU input shape:", gru_input.shape)  # [B, T=9, F=256]
+        all_hidden_states, h_n = self.gru(gru_input)               # h_n: [1, B, H_gru] ComplexGRU returns (all_hidden_states, final_h)
+        print("GRU output shape:", h_n.shape)    
+        h_n = h_n.squeeze(0)                     # [B, H_gru]
+        # i can sent he whole hidden state to the decoder all_hidden_states shape: [B, T, H_gru]
+        decoded_vols = [] 
+        for t in range(T):
+            h_n_t = all_hidden_states[:, t, :] # [B, H_gru]
+            decoded_vol = self.decoder(h_n_t)               # [B, 1, D, H, W]
+            decoded_vols.append(decoded_vol)
+        # Stack the decoded volumes to form the output [B, T, 1, D, H, W]
+        output = torch.stack(decoded_vols, dim=1)  # # [B, T=9, 1, D, H, W]
+        output = output.squeeze(2)  # Remove the channel dimension: [B, T=9, D, H, W]
+        output = self.final_conv(output)
+        # output shape: [B, 1, D, H, W]
+        return output

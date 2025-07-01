@@ -12,7 +12,7 @@ sys.path.append(os.path.join(current_dir, "src"))
 
 from dataset import BeamformDataset, BeamformDataset_patch_based, BeamformData
 from utils import ComplexL1TVLoss, ComplexMSETVLoss, ComplexMSE_SSIMLoss, ComplexMSELoss
-from model import CIDNet3D, CxUnet_RB
+from model import CIDNet3D, CxUnet_RB, ComplexRNN_GRU_all_h, ComplexRNN_GRU
 from training import train_and_validate
 from testing import test_model
 
