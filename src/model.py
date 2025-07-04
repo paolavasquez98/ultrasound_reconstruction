@@ -114,7 +114,7 @@ class Bottleneck(nn.Module):
     def __init__(self, in_channels, out_channels, num_groups):
         super(Bottleneck, self).__init__()
         self.block = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat),
             ComplexBatchNorm3D(out_channels),
             # ComplexGroupNorm3D(num_groups, out_channels),
             ComplexReLU(),
