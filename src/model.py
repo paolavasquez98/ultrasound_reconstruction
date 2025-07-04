@@ -484,3 +484,97 @@ class ComplexRNN_GRU_all_h(nn.Module):
         output = self.final_conv(output)
         # output shape: [B, 1, D, H, W]
         return output
+    
+# -------------- Complex GRU for 3D data (convolutions inside the cell) --------------
+class ComplexGRUCell_3D(nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super().__init__()
+        self.input_dim = in_channels
+        self.hidden_channels = hidden_channels
+
+        self.x_z = nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat) # input to hidden
+        self.h_z = nn.Conv3d(hidden_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat) # hidden to hidden
+
+        self.x_r = nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat)
+        self.h_r = nn.Conv3d(hidden_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat)
+
+        self.x_h = nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat)
+        self.h_h = nn.Conv3d(hidden_channels, hidden_channels, kernel_size=3, padding=1, dtype=torch.cfloat)
+
+        self.sigmoid = CVSigmoid()
+        self.tanh = CVPolarTanh()
+
+    def forward(self, x , h):
+        # x, h: [B, C, D, H, W] complex-valued
+
+        # Compute update gate
+        z = self.sigmoid(self.x_z(x) + self.h_z(h)) #input to hidden + hidden to hidden
+
+        # Compute reset gate
+        r = self.sigmoid(self.x_r(x) + self.h_r(h))
+
+        # Compute candidate hidden state
+        h_tilde = self.tanh(self.x_h(x) + self.h_h(r * h)) # Element-wise complex multiplication (r * h)
+
+        # Final hidden state update
+        h_new = (1 - z) * h + z * h_tilde
+        return h_new
+
+class ComplexGRU_3D(nn.Module):
+    '''Input is the [B, T, D, H, W] complex-valued tensor where B is batch size, T is time steps, and then volume size.'''
+    def __init__(self, in_channels, hidden_channels, num_layers=1, bias=True, batch_first=True):
+        super().__init__()
+        self.input_dim = in_channels
+        self.hidden_channels = hidden_channels
+        self.cell = ComplexGRUCell_3D(in_channels, hidden_channels)
+
+    def forward(self, x):
+        # x: [B, T=9, 1, D, H, W]
+        B, T, C, D, H, W = x.shape
+        # initialize hidden state it must be [num_layers * num_directions, B, hidden_size]
+        h = torch.zeros(1, B, self.hidden_channels, D, H, W, dtype=torch.cfloat, device=x.device)
+        current_h = h[0, :, :, :, :, :]  # [B, C, D, H, W]
+
+        hidden_states = []
+        for t in range(T):
+            current_x = x[:, t, :, :, :, :] # [B, C, D, H, W]
+            current_h = self.cell(current_x, current_h) #update the current hidden state
+            hidden_states.append(current_h)
+        all_hidden_states = torch.stack(hidden_states, dim=0)  # [T, B, hidden_channels, D, H, W]
+        all_hidden_states = all_hidden_states.transpose(0, 1)  # [B, T, hidden_channels, D, H, W]
+        final_h = current_h.unsqueeze(0) # [1, B, hidden_channels, D, H, W]
+        return all_hidden_states, final_h  # all_hidden_states: [B, T, hidden_channels, D, H, W], final_h: [1, B, hidden_channels, D, H, W]
+    
+class ComplexRNN_GRU_3D(nn.Module):
+    """This ConvGRU is a complex-valued GRU that processes 3D data. and only considers the last hidden state."""
+    def __init__(self):
+        super().__init__()
+        self.gru1 = ComplexGRU_3D(in_channels=1, hidden_channels=8)
+        self.gru2 = ComplexGRU_3D(in_channels=8, hidden_channels=16)
+        self.gru3 = ComplexGRU_3D(in_channels=16, hidden_channels=32)
+        self.final_conv = nn.Conv3d(32, 1, kernel_size=1)
+
+    def forward(self, x):  # x input shape: [B, C=9, D, H, W]
+        # add a channel dimension to have x: [B, T=9, 1, D, H, W]
+        x = x.unsqueeze(2)  
+        B, T, C, D, H, W = x.shape
+        print("GRU input shape:", x.shape)  # [B, T=9, 1, D, H, W]
+        all_hidden_states, h_n1 = self.gru1(x)  # all_hidden_states: [B, T, 8, D, H, W], h_n: [1, B, 8, D, H, W]
+        print("GRU output shape:", h_n1.shape)    
+        h_n1 = h_n1.squeeze(0)                     # [B, 8, D, H, W]
+        print("output shape after gru1:", h_n1.shape)  # [B, C, D, H, W]
+
+        all_hidden_states, h_n2 = self.gru2(h_n1)  # all_hidden_states: [B, T, 16, D, H, W], h_n: [1, B, 16, D, H, W]
+        print("GRU output shape:", h_n2.shape)
+        h_n2 = h_n2.squeeze(0)                     # [B, 16, D, H, W]
+        print("output shape after gru2:", h_n2.shape)
+
+        all_hidden_states, h_n3 = self.gru3(h_n2)  # all_hidden_states: [B, T, 32, D, H, W], h_n: [1, B, 32, D, H, W]
+        print("GRU output shape:", h_n3.shape)
+        h_n3 = h_n3.squeeze(0)                     # [B, 32, D, H, W]
+        print("output shape after gru3:", h_n3.shape)
+
+        out = torch.abs(h_n3)  # Take the magnitude of the complex output
+        out = self.final_conv(out)  # [B, 1, D, H, W]
+        print("Final output shape:", out.shape)
+        return out
